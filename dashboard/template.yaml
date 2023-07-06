@@ -1,0 +1,467 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Elasticbeanstalk dashboard.
+
+Parameters:
+  Date:
+    Description: Elasticbeanstalk version number
+    Type: String
+  Env:
+    Description: Dev or prod environment
+    Type: String
+    Default: prod
+    AllowedValues:
+      - prod
+      - dev
+    ConstraintDescription: Must be a prod or dev
+
+Mappings:
+  EnvMappings:
+    acm-arn:
+      prod: arn:aws:acm:us-east-1:1234567989:certificate/1234
+      dev: arn:aws:acm:us-east-1:1234567989:certificate/1234
+    ec2-instance-type:
+      prod: t3.small
+      dev: t3.small
+    as-max-size:
+      prod: 10
+      dev: 3
+    cnameprefix:
+      prod: mylittletrading-prod
+      dev: mylittletrading-dev
+    appname:
+      prod: mylittletrading-prod
+      dev: mylittletrading-dev
+    sgname:
+      prod: mylittletrading-prod
+      dev: mylittletrading-dev
+    dns:
+      prod: https://mylittletrading.com
+      dev: https://mylittletrading.com
+
+Resources:
+
+  Application:
+    Type: AWS::ElasticBeanstalk::Application
+    Properties:
+      ApplicationName: !FindInMap [EnvMappings, appname, !Ref Env]
+      Description: !FindInMap [EnvMappings, appname, !Ref Env]
+
+  AppVersion:
+    Type: AWS::ElasticBeanstalk::ApplicationVersion
+    UpdateReplacePolicy: Retain
+    Properties:
+      ApplicationName:
+        Ref: Application
+      Description:
+        Ref: Date
+      SourceBundle:
+        S3Bucket: !ImportValue DashboardBucket
+        S3Key: !Sub ${Env}/python-dashboard-${Date}.zip
+
+  Environment:
+    Type: AWS::ElasticBeanstalk::Environment
+    Properties:
+      ApplicationName: !Ref Application
+      CNAMEPrefix: !FindInMap [EnvMappings, cnameprefix, !Ref Env]
+      Description: AWS Elastic Beanstalk Environment running Python Dash Application
+      VersionLabel: !Ref AppVersion
+      TemplateName: !Ref ConfigTemplate
+      EnvironmentName: !Ref Application
+      Tier:
+        Name: WebServer
+        Type: Standard
+
+  ALBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for application load balancer of dashboard
+      GroupName: !FindInMap [EnvMappings, sgname, !Ref Env]
+      SecurityGroupEgress:
+        - CidrIp: 0.0.0.0/0
+          FromPort: 443
+          IpProtocol: tcp
+          ToPort: 443
+        - CidrIp: 0.0.0.0/0
+          FromPort: 80
+          IpProtocol: tcp
+          ToPort: 80
+      SecurityGroupIngress:
+        - CidrIp: 0.0.0.0/0
+          FromPort: 80
+          IpProtocol: tcp
+          ToPort: 80
+        - CidrIp: 0.0.0.0/0
+          FromPort: 443
+          IpProtocol: tcp
+          ToPort: 443
+      VpcId: vpc-31f34d4b
+
+  ConfigTemplate:
+    Type: AWS::ElasticBeanstalk::ConfigurationTemplate
+    Properties:
+      ApplicationName:
+        Ref: Application
+      SolutionStackName: 64bit Amazon Linux 2 v3.2.2 running Python 3.8
+      Description: "Default configuration template"
+      OptionSettings:
+        - Namespace: 'aws:autoscaling:launchconfiguration'
+          OptionName: IamInstanceProfile
+          Value: !Ref InstanceProfile
+        - Namespace: 'aws:elasticbeanstalk:environment'
+          OptionName: ServiceRole
+          Value: !Ref ServiceRole
+        - Namespace: 'aws:elasticbeanstalk:environment'
+          OptionName: EnvironmentType
+          Value: LoadBalanced
+        - Namespace: 'aws:elasticbeanstalk:environment'
+          OptionName: LoadBalancerType
+          Value: application
+        - Namespace: 'aws:elasticbeanstalk:environment:process:default'
+          OptionName: Port
+          Value: 80
+        - Namespace: 'aws:elasticbeanstalk:environment:process:default'
+          OptionName: StickinessEnabled
+          Value: true
+        - Namespace: 'aws:elasticbeanstalk:environment:process:default'
+          OptionName: HealthCheckPath
+          Value: /health
+        - Namespace: 'aws:elasticbeanstalk:environment:process:default'
+          OptionName: MatcherHTTPCode
+          Value: 200
+#        - Namespace: 'aws:elbv2:listener:default'
+#          OptionName: ListenerEnabled
+#          Value: false
+        - Namespace: 'aws:elbv2:listener:443'
+          OptionName: ListenerEnabled
+          Value: true
+        - Namespace: 'aws:elbv2:listener:443'
+          OptionName: Protocol
+          Value: HTTPS
+        - Namespace: 'aws:elasticbeanstalk:environment:proxy'
+          OptionName: ProxyServer
+          Value: apache
+        - Namespace: 'aws:elasticbeanstalk:cloudwatch:logs'
+          OptionName: StreamLogs
+          Value: true
+        - Namespace: 'aws:elasticbeanstalk:cloudwatch:logs:health'
+          OptionName: HealthStreamingEnabled
+          Value: true
+        - Namespace: 'aws:elasticbeanstalk:cloudwatch:logs:health'
+          OptionName: RetentionInDays
+          Value: 60
+        - Namespace: 'aws:elasticbeanstalk:cloudwatch:logs'
+          OptionName: RetentionInDays
+          Value: 60
+        - Namespace: 'aws:elasticbeanstalk:cloudwatch:logs'
+          OptionName: DeleteOnTerminate
+          Value: false
+        - Namespace: 'aws:elbv2:listener:443'
+          OptionName: SSLCertificateArns
+          Value: !FindInMap [EnvMappings, acm-arn, !Ref Env]
+        - Namespace: 'aws:ec2:instances'
+          OptionName: InstanceTypes
+          Value: !FindInMap [EnvMappings, ec2-instance-type, !Ref Env]
+        - Namespace: 'aws:autoscaling:asg'
+          OptionName: MinSize
+          Value: 1
+        - Namespace: 'aws:autoscaling:asg'
+          OptionName: MaxSize
+          Value: !FindInMap [EnvMappings, as-max-size, !Ref Env]
+        - Namespace: 'aws:autoscaling:asg'
+          OptionName: Cooldown
+          Value: 300
+        - Namespace: 'aws:elasticbeanstalk:container:python'
+          OptionName: NumThreads
+          Value: 15
+        - Namespace: 'aws:autoscaling:trigger'
+          OptionName: LowerThreshold
+          Value: 10
+        - Namespace: 'aws:autoscaling:trigger'
+          OptionName: UpperThreshold
+          Value: 30
+        - Namespace: 'aws:autoscaling:trigger'
+          OptionName: MeasureName
+          Value: RequestCount
+        - Namespace: 'aws:autoscaling:trigger'
+          OptionName: Period
+          Value: 1
+        - Namespace: 'aws:autoscaling:trigger'
+          OptionName: Statistic
+          Value: Sum
+        - Namespace: 'aws:autoscaling:trigger'
+          OptionName: LowerBreachScaleIncrement
+          Value: -1
+        - Namespace: 'aws:autoscaling:trigger'
+          OptionName: UpperBreachScaleIncrement
+          Value: 2
+        - Namespace: 'aws:autoscaling:trigger'
+          OptionName: Unit
+          Value: Count
+        - Namespace: 'aws:autoscaling:updatepolicy:rollingupdate'
+          OptionName: RollingUpdateEnabled
+          Value: true
+        - Namespace: 'aws:autoscaling:updatepolicy:rollingupdate'
+          OptionName: RollingUpdateType
+          Value: Time
+        - Namespace: 'aws:autoscaling:updatepolicy:rollingupdate'
+          OptionName: Timeout
+          Value: PT10M
+        - Namespace: 'aws:elasticbeanstalk:command'
+          OptionName: DeploymentPolicy
+          Value: Rolling
+        - Namespace: 'aws:elasticbeanstalk:sns:topics'
+          OptionName: Notification Topic ARN
+          Value: !ImportValue DashboardTopic
+        - Namespace: 'aws:elasticbeanstalk:sns:topics'
+          OptionName: Notification Protocol
+          Value: email
+        - Namespace: 'aws:elasticbeanstalk:sns:topics'
+          OptionName: Notification Endpoint
+          Value: someemail@gmail.com
+        - Namespace: 'aws:elbv2:loadbalancer'
+          OptionName: ManagedSecurityGroup
+          Value: !Ref ALBSecurityGroup
+        - Namespace: 'aws:elbv2:loadbalancer'
+          OptionName: SecurityGroups
+          Value: !Ref ALBSecurityGroup
+        - Namespace: 'aws:elasticbeanstalk:application:environment'
+          OptionName: DBPORT
+          Value: 80
+        - Namespace: 'aws:elasticbeanstalk:application:environment'
+          OptionName: DBENV
+          Value: !Ref Env
+        - Namespace: 'aws:elasticbeanstalk:application:environment'
+          OptionName: DBCOGNITODOMAIN
+          Value: !ImportValue {"Fn::Sub": "SignInPageDomainName-${Env}" }
+        - Namespace: 'aws:elasticbeanstalk:application:environment'
+          OptionName: DBCOGNITOCLIENTID
+          Value: !ImportValue {"Fn::Sub": "UserPoolClientID-${Env}" }
+        - Namespace: 'aws:elasticbeanstalk:application:environment'
+          OptionName: DBDNS
+          Value: !FindInMap [EnvMappings, dns, !Ref Env]
+        - Namespace: 'aws:elasticbeanstalk:application:environment'
+          OptionName: DBREGION
+          Value: !Ref "AWS::Region"
+        - Namespace: 'aws:elasticbeanstalk:application:environment'
+          OptionName: DBBALANCETABLE
+          Value: !ImportValue trd-ema-dep-balance-table
+        - Namespace: 'aws:elasticbeanstalk:application:environment'
+          OptionName: DBSTRATEGIESTABLE
+          Value: !ImportValue trd-ema-dep-strategies-table
+        - Namespace: 'aws:elasticbeanstalk:application:environment'
+          OptionName: DBACCOUNTSTABLE
+          Value: !ImportValue trd-ema-dep-account-table
+        - Namespace: 'aws:elasticbeanstalk:customoption'
+          OptionName: UserPoolArn
+          Value: { "Fn::ImportValue" : { "Fn::Join" : [ "-", [ "UserPoolArn", { "Ref" : "Env" } ] ] } }
+        - Namespace: 'aws:elasticbeanstalk:customoption'
+          OptionName: UserPoolClientId
+          Value: { "Fn::ImportValue" : { "Fn::Join" : [ "-", [ "UserPoolClientID", { "Ref" : "Env" } ] ] } }
+        - Namespace: 'aws:elasticbeanstalk:customoption'
+          OptionName: UserPoolDomain
+          Value: { "Fn::ImportValue" : { "Fn::Join" : [ "-", [ "SignInPageDomainName", { "Ref" : "Env" } ] ] } }
+        - Namespace: 'aws:elasticbeanstalk:customoption'
+          OptionName: WAFName
+          Value: { "Fn::Join" : [ "-", [ "WAF", "dashboard", { "Ref" : "Env" } ] ] }
+        - Namespace: 'aws:elasticbeanstalk:managedactions'
+          OptionName: ManagedActionsEnabled
+          Value: true
+        - Namespace: 'aws:elasticbeanstalk:managedactions'
+          OptionName: PreferredStartTime
+          Value: Sun:04:00
+        - Namespace: 'aws:elasticbeanstalk:managedactions'
+          OptionName: ServiceRoleForManagedUpdates
+          Value: AWSServiceRoleForElasticBeanstalkManagedUpdates
+        - Namespace: 'aws:elasticbeanstalk:managedactions:platformupdate'
+          OptionName: UpdateLevel
+          Value: minor
+        - Namespace: 'aws:elasticbeanstalk:managedactions:platformupdate'
+          OptionName: InstanceRefreshEnabled
+          Value: true
+
+  ServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Sid: ''
+            Effect: Allow
+            Principal:
+              Service: elasticbeanstalk.amazonaws.com
+            Action: 'sts:AssumeRole'
+            Condition:
+              StringEquals:
+                'sts:ExternalId': elasticbeanstalk
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSElasticBeanstalkService
+        - arn:aws:iam::aws:policy/service-role/AWSElasticBeanstalkEnhancedHealth
+      Policies:
+        - PolicyName: root
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: "Allow"
+                Action:
+                  - "sns:SetTopicAttributes"
+                  - "sns:GetTopicAttributes"
+                  - "sns:Subscribe"
+                  - "sns:Unsubscribe"
+                  - "sns:Publish"
+                Resource:
+                  - !ImportValue DashboardTopic
+      Path: /
+
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Path: /
+      Roles:
+        - !Ref InstanceProfileRole
+
+  InstanceProfileRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AWSElasticBeanstalkWebTier
+        - arn:aws:iam::aws:policy/AWSElasticBeanstalkMulticontainerDocker
+        - arn:aws:iam::aws:policy/AWSElasticBeanstalkWorkerTier
+      Path: /
+      Policies:
+        - PolicyDocument:
+            {
+              "Version": "2012-10-17",
+              "Statement": [
+              {
+                "Sid": "VisualEditor0",
+                "Effect": "Allow",
+                "Action": "cognito-idp:GlobalSignOut",
+                "Resource": "*"
+              }
+              ]
+            }
+          PolicyName: Cognito-sign-out
+        - PolicyDocument:
+            {
+              "Version": "2012-10-17",
+              "Statement": [
+              {
+                "Effect": "Allow",
+                "Action": [
+                  "dynamodb:GetItem",
+                  "dynamodb:DeleteItem",
+                  "dynamodb:PutItem",
+                  "dynamodb:Scan",
+                  "dynamodb:Query",
+                  "dynamodb:UpdateItem",
+                  "dynamodb:BatchWriteItem",
+                  "dynamodb:BatchGetItem",
+                  "dynamodb:DescribeTable",
+                  "dynamodb:ConditionCheckItem"
+                ],
+                "Resource": [
+                {
+                  "Fn::Sub": [
+                    "arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${tableName}",
+                    {
+                      "tableName": {
+                        "Fn::ImportValue": "trd-ema-dep-balance-table"
+                      }
+                    }
+                  ]
+                },
+                {
+                  "Fn::Sub": [
+                    "arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${tableName}/index/*",
+                    {
+                      "tableName": {
+                        "Fn::ImportValue": "trd-ema-dep-balance-table"
+                      }
+                    }
+                  ]
+                },
+                {
+                  "Fn::Sub": [
+                    "arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${tableName}",
+                    {
+                      "tableName": {
+                        "Fn::ImportValue": "trd-ema-dep-strategies-table"
+                      }
+                    }
+                  ]
+                },
+                {
+                  "Fn::Sub": [
+                    "arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${tableName}/index/*",
+                    {
+                      "tableName": {
+                        "Fn::ImportValue": "trd-ema-dep-strategies-table"
+                      }
+                    }
+                  ]
+                },
+                {
+                  "Fn::Sub": [
+                    "arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${tableName}",
+                    {
+                      "tableName": {
+                        "Fn::ImportValue": "trd-ema-dep-account-table"
+                      }
+                    }
+                  ]
+                },
+                {
+                  "Fn::Sub": [
+                    "arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${tableName}/index/*",
+                    {
+                      "tableName": {
+                        "Fn::ImportValue": "trd-ema-dep-account-table"
+                      }
+                    }
+                  ]
+                }
+                ]
+              }
+              ]
+            }
+          PolicyName: Dynamo-permissions
+        - PolicyDocument:
+            {
+              "Version": "2012-10-17",
+              "Statement": [
+              {
+                "Action": ["kms:Encrypt", "kms:Decrypt"],
+                "Effect": "Allow",
+                "Resource": {
+                  "Fn::Sub": [
+                    "arn:${AWS::Partition}:kms:${AWS::Region}:${AWS::AccountId}:key/${keyId}",
+                    {
+                      "keyId": {
+                        "Fn::ImportValue": "trd-ema-dep-kms-id"
+                      }
+                    }
+                  ]
+                }
+              }
+              ]
+            }
+          PolicyName: KMS-permissions
+        - PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: "AllowSNSPublish"
+                Effect: "Allow"
+                Action:
+                  - "sns:Subscribe"
+                  - "sns:Unsubscribe"
+                Resource: "*"
+          PolicyName: SNS-permissions

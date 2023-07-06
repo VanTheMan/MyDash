@@ -1,0 +1,390 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: >
+  Dashboard pipeline dependencies
+
+Parameters:
+  DevSourceObjectKey:
+    Description: 'S3 dev branch source artifact'
+    Type: String
+    Default: build-artifacts/packaged_dev.zip
+  MasterSourceObjectKey:
+    Description: 'S3 master branch source artifact'
+    Type: String
+    Default: build-artifacts/packaged_master.zip
+
+Resources:
+
+  BuildArtifactsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: 'aws:kms'
+              KMSMasterKeyID: arn:aws:kms:eu-west-1:123456789:key/1c8e4331-9d92-43c3-ac85-4a95504
+      BucketName:
+        Fn::Join:
+          - '-'
+          - - Ref: AWS::StackName
+            - build-artifacts
+            - !Sub "${AWS::Region}"
+      VersioningConfiguration:
+        Status: Enabled
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+
+  AWSCloudTrailBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    Properties:
+      BucketName:
+        Fn::Join:
+          - '-'
+          - - Ref: AWS::StackName
+            - cloudtrail
+            - !Sub "${AWS::Region}"
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: 'aws:kms'
+              KMSMasterKeyID: arn:aws:kms:eu-west-1:123456789:key/1c8e4331-9d92-43c3-ac85-8dddb4a95504
+
+  AWSCloudTrailBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref AWSCloudTrailBucket
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Sid: AWSCloudTrailAclCheck
+            Effect: Allow
+            Principal:
+              Service:
+                - cloudtrail.amazonaws.com
+            Action: s3:GetBucketAcl
+            Resource: !GetAtt AWSCloudTrailBucket.Arn
+          - Sid: AWSCloudTrailWrite
+            Effect: Allow
+            Principal:
+              Service:
+                - cloudtrail.amazonaws.com
+            Action: s3:PutObject
+            Resource: !Join [ '', [ !GetAtt AWSCloudTrailBucket.Arn, '/AWSLogs/', !Ref 'AWS::AccountId', '/*' ] ]
+            Condition:
+              StringEquals:
+                s3:x-amz-acl: bucket-owner-full-control
+
+  AwsCloudTrail:
+    DependsOn:
+      - AWSCloudTrailBucketPolicy
+    Type: AWS::CloudTrail::Trail
+    Properties:
+      S3BucketName: !Ref AWSCloudTrailBucket
+      EventSelectors:
+        - DataResources:
+            - Type: AWS::S3::Object
+              Values:
+                - !Join [ '', [ !GetAtt BuildArtifactsBucket.Arn, '/', !Ref DevSourceObjectKey ] ]
+            - Type: AWS::S3::Object
+              Values:
+                - !Join [ '', [ !GetAtt BuildArtifactsBucket.Arn, '/', !Ref MasterSourceObjectKey ] ]
+          ReadWriteType: WriteOnly
+      IncludeGlobalServiceEvents: true
+      IsLogging: true
+      IsMultiRegionTrail: true
+
+  CodeBuildServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Action:
+              - 'sts:AssumeRole'
+            Effect: Allow
+            Principal:
+              Service:
+                - codebuild.amazonaws.com
+      Path: /
+      Policies:
+        - PolicyName:
+            Fn::Join:
+              - '-'
+              - - Ref: AWS::StackName
+                - CodeBuildLogs
+                - !Sub "${AWS::Region}"
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'logs:CreateLogGroup'
+                  - 'logs:CreateLogStream'
+                  - 'logs:PutLogEvents'
+                Resource: '*'
+        - PolicyName:
+            Fn::Join:
+              - '-'
+              - - Ref: AWS::StackName
+                - CodeBuildBucket
+                - !Sub "${AWS::Region}"
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 's3:GetObjectVersion'
+                  - 's3:PutObject'
+                Resource:
+                  - !Join ['', ["arn:aws:s3:::", {"Fn::ImportValue" : DashboardBucket}, "/*"]]
+                  - !Sub 'arn:aws:s3:::${BuildArtifactsBucket}/*'
+        - PolicyName:
+            Fn::Join:
+              - '-'
+              - - Ref: AWS::StackName
+                - CodeBuildParameterStore
+                - !Sub "${AWS::Region}"
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: 'ssm:GetParameters'
+                Resource: '*'
+        - PolicyName:
+            Fn::Join:
+              - '-'
+              - - Ref: AWS::StackName
+                - CodeBuildSecrets
+                - !Sub "${AWS::Region}"
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: "secretsmanager:*"
+                Resource: 'arn:aws:secretsmanager:us-east-2:123456789:secret:intelligence-engine-db-staging-Em7MfW'
+        - PolicyName:
+            Fn::Join:
+              - '-'
+              - - Ref: AWS::StackName
+                - KMS
+                - !Sub "${AWS::Region}"
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: 
+                  - kms:Encrypt
+                  - kms:Decrypt
+                  - kms:ReEncrypt*
+                  - kms:GenerateDataKey*
+                  - kms:DescribeKey
+                Resource: arn:aws:kms:eu-west-1:123456789:key/1c8e4331-9d92-43c3-ac85-8dddb4a95504
+
+      RoleName:
+        Fn::Join:
+          - '-'
+          - - Ref: AWS::StackName
+            - CodeBuildServiceRole
+            - !Sub "${AWS::Region}"
+
+  CloudFormationExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          Action: 'sts:AssumeRole'
+          Effect: Allow
+          Principal:
+            Service: cloudformation.amazonaws.com
+      Path: /
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/AdministratorAccess'
+      RoleName:
+        Fn::Join:
+          - '-'
+          - - Ref: AWS::StackName
+            - CloudFormationExecution
+            - !Sub "${AWS::Region}"
+
+  CodePipelineExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Action:
+              - 'sts:AssumeRole'
+            Effect: Allow
+            Principal:
+              Service:
+                - codepipeline.amazonaws.com
+      Path: /
+      Policies:
+        - PolicyName:
+            Fn::Join:
+              - '-'
+              - - Ref: AWS::StackName
+                - CodePipelineLambda
+                - !Sub "${AWS::Region}"
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'iam:PassRole'
+                  - 'lambda:InvokeFunction'
+                  - 'lambda:ListFunctions'
+                  - 'lambda:InvokeAsyc'
+                Resource: '*'
+        - PolicyName:
+            Fn::Join:
+              - '-'
+              - - Ref: AWS::StackName
+                - CodePipelineCodeAndArtifactsS3Bucket
+                - !Sub "${AWS::Region}"
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: 's3:*'
+                Resource: '*'
+        - PolicyName:
+            Fn::Join:
+              - '-'
+              - - Ref: AWS::StackName
+                - CodePipelineCloudformationAccess
+                - !Sub "${AWS::Region}"
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'cloudformation:CreateStack'
+                  - 'cloudformation:DescribeStacks'
+                  - 'cloudformation:DeleteStack'
+                  - 'cloudformation:UpdateStack'
+                  - 'cloudformation:CreateChangeSet'
+                  - 'cloudformation:ExecuteChangeSet'
+                  - 'cloudformation:DeleteChangeSet'
+                  - 'cloudformation:DescribeChangeSet'
+                  - 'cloudformation:SetStackPolicy'
+                  - 'cloudformation:SetStackPolicy'
+                  - 'cloudformation:ValidateTemplate'
+                Resource:
+                  - !Sub 'arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/*'
+                  - !Sub 'arn:aws:cloudformation:${AWS::Region}:aws:transform/Serverless-2016-10-31'
+        - PolicyName:
+            Fn::Join:
+              - '-'
+              - - Ref: AWS::StackName
+                - CodePipelineCodeStar
+                - !Sub "${AWS::Region}"
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: "codestar-connections:UseConnection"
+                Resource: "*"
+      RoleName:
+        Fn::Join:
+          - '-'
+          - - Ref: AWS::StackName
+            - CodePipelineExecutionRole
+            - !Sub "${AWS::Region}"
+
+  CloudWatchEventRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - events.amazonaws.com
+            Action: sts:AssumeRole
+      Path: /
+      Policies:
+        - PolicyName:
+            Fn::Join:
+              - '-'
+              - - Ref: AWS::StackName
+                - CloudwatchEventPipelineExecution
+                - !Sub "${AWS::Region}"
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action: codepipeline:StartPipelineExecution
+                Resource: !Join [ '', [ 'arn:aws:codepipeline:', !Ref 'AWS::Region', ':', !Ref 'AWS::AccountId', ':', "*" ] ]
+        - PolicyName:
+            Fn::Join:
+              - '-'
+              - - Ref: AWS::StackName
+                - CloudwatchEventCodePipelineS3Bucket
+                - !Sub "${AWS::Region}"
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: 's3:*'
+                Resource: !Sub 'arn:aws:s3:::${BuildArtifactsBucket}/*'
+      RoleName:
+        Fn::Join:
+          - '-'
+          - - Ref: AWS::StackName
+            - CloudWatchEventRole
+            - !Sub "${AWS::Region}"
+
+Outputs:
+
+  BuildArtifactsBucket:
+    Description: "Build artifacts S3 bucket ARN that code build and pipeline will use."
+    Value: !Ref BuildArtifactsBucket
+    Export:
+      Name: 
+        Fn::Join:
+          - '-'
+          - - Ref: AWS::StackName
+            - BuildArtifactsBucket  
+
+  CodeBuildIAMRole:
+    Description: CodeBuild IAM Role
+    Value: !GetAtt CodeBuildServiceRole.Arn
+    Export:
+      Name: 
+        Fn::Join:
+          - '-'
+          - - Ref: AWS::StackName
+            - CodeBuildIAMRoleARN 
+
+  CloudformationIAMRole:
+    Description: Cloudformation IAM Role
+    Value: !GetAtt CloudFormationExecutionRole.Arn
+    Export:
+      Name: 
+        Fn::Join:
+          - '-'
+          - - Ref: AWS::StackName
+            - CloudformationIAMRoleARN 
+
+  CodePipelineIAMRole:
+    Description: CodePipeline IAM Role
+    Value: !GetAtt CodePipelineExecutionRole.Arn
+    Export:
+      Name: 
+        Fn::Join:
+          - '-'
+          - - Ref: AWS::StackName
+            - CodePipelineIAMRoleARN 
+
+  CloudWatchEventRole:
+    Description: CodePipeline IAM Role
+    Value: !GetAtt CloudWatchEventRole.Arn
+    Export:
+      Name: 
+        Fn::Join:
+          - '-'
+          - - Ref: AWS::StackName
+            - CloudWatchEventRoleARN 

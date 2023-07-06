@@ -1,0 +1,101 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Elasticbeanstalk dashboard dependencies.
+
+Resources:
+
+  Topic:
+    Type: AWS::SNS::Topic
+    Properties:
+      DisplayName:
+        Fn::Join:
+          - '-'
+          - - Ref: AWS::StackName
+      TopicName:
+        Fn::Join:
+          - '-'
+          - - Ref: AWS::StackName
+
+  TopicPolicy:
+    Type: AWS::SNS::TopicPolicy
+    Properties:
+      PolicyDocument:
+        {
+          "Version": "2008-10-17",
+          "Id": "__default_policy_ID",
+          "Statement": [
+          {
+            "Sid": "__default_statement_ID",
+            "Effect": "Allow",
+            "Principal": {
+              "AWS": "*"
+            },
+            "Action": [
+              "SNS:GetTopicAttributes",
+              "SNS:SetTopicAttributes",
+              "SNS:AddPermission",
+              "SNS:RemovePermission",
+              "SNS:DeleteTopic",
+              "SNS:Subscribe",
+              "SNS:ListSubscriptionsByTopic",
+              "SNS:Publish",
+              "SNS:Receive"
+            ],
+            "Resource": !Ref Topic,
+            "Condition": {
+              "StringEquals": {
+                "AWS:SourceOwner": !Ref "AWS::AccountId"
+              }
+            }
+          },
+          {
+            "Sid": "AWSCodeStarNotifications_publish",
+            "Effect": "Allow",
+            "Principal": {
+              "Service": [
+                "codestar-notifications.amazonaws.com"
+              ]
+            },
+            "Action": "SNS:Publish",
+            "Resource": '*'
+          }
+          ]
+        }
+      Topics:
+        - !Ref Topic
+
+  TopicSubscription1:
+    Type: AWS::SNS::Subscription
+    Properties:
+      Endpoint: somemail@gmail.com
+      Protocol: email
+      TopicArn:
+        Ref: Topic
+
+  S3Bucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+        - ServerSideEncryptionByDefault:
+            SSEAlgorithm: 'aws:kms'
+            KMSMasterKeyID: !ImportValue trd-ema-dep-kms-arn
+      BucketName:
+        Fn::Join:
+          - '-'
+          - - Ref: AWS::StackName
+            - !Sub "${AWS::Region}"
+        
+Outputs:
+
+  DashboardBucket:
+    Description: "S3 bucket used in elasticbeastalk dashboard."
+    Value: !Ref S3Bucket
+    Export:
+      Name: DashboardBucket
+
+  Topic:
+    Description: "Topic used in dashboard."
+    Value: !Ref Topic
+    Export:
+      Name: DashboardTopic

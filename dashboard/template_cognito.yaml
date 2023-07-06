@@ -1,0 +1,167 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Cognito Stack
+
+Parameters:
+
+  Env:
+    Description: Dev or prod environment
+    Type: String
+    Default: prod
+    AllowedValues:
+      - prod
+      - dev
+    ConstraintDescription: Must be a prod or dev
+
+Mappings:
+  EnvMappings:
+    callback:
+      prod: https://mylittletrading.com/oauth2/idpresponse
+      dev: https://mylittletrading.com/oauth2/idpresponse
+    logout:
+      prod: https://mylittletrading.com
+      dev: https://mylittletrading.com
+    domain:
+      prod: mylittletrading
+      dev: mylittletrading-dev
+    userpoolname:
+      prod: mylittletrading-prod
+      dev: mylittletrading-dev
+
+Resources:
+
+  CognitoSMSRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - cognito-idp.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+            Condition:
+              StringEquals:
+                sts:ExternalId: "35f2831d-faaf-440d-9ee0-d744c07c8e79"
+      Description: Grants permission to cognito to publish sns sms messages
+      Path: /
+      Policies:
+        - PolicyName:
+            Fn::Join:
+              - '-'
+              - - Ref: AWS::StackName
+                - cognito
+                - policy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: "Allow"
+                Action:
+                  - "sns:publish"
+                Resource:
+                  "*"
+      RoleName:
+        Fn::Join:
+          - '-'
+          - - Ref: AWS::StackName
+            - cognito
+            - role
+
+  UserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      AccountRecoverySetting:
+        RecoveryMechanisms:
+          - Name: verified_email
+            Priority: 1
+      AdminCreateUserConfig:
+        AllowAdminCreateUserOnly: true
+        InviteMessageTemplate:
+          EmailMessage: !Sub Your username is {username} and temporary password is {####} for the plentify dashboard ${Env} environment.
+          EmailSubject: !Sub 'Your temporary password for the cryptoskytrading dashboard ${Env} environment'
+          SMSMessage: !Sub Your username is {username} and temporary password is {####} for the plentify dashboard ${Env} environment.
+      AliasAttributes:
+        - email
+      AutoVerifiedAttributes:
+        - email
+        - phone_number
+      DeviceConfiguration:
+        ChallengeRequiredOnNewDevice: true
+        DeviceOnlyRememberedOnUserPrompt: true
+      MfaConfiguration: 'ON'
+      EnabledMfas:
+        - SOFTWARE_TOKEN_MFA
+        - SMS_MFA
+      Schema:
+        - AttributeDataType: String
+          DeveloperOnlyAttribute: false
+          Mutable: false
+          Name: email
+          Required: true
+        - AttributeDataType: String
+          DeveloperOnlyAttribute: false
+          Mutable: true
+          Name: phone_number
+          Required: true
+      UsernameConfiguration:
+        CaseSensitive: true
+      UserPoolName: !FindInMap [EnvMappings, userpoolname, !Ref Env]
+      SmsConfiguration:
+        ExternalId: "35f2831d-faaf-440d-9ee0-d744c07c8e79"
+        SnsCallerArn: !GetAtt CognitoSMSRole.Arn
+
+  PoolClientUser:
+    Type: AWS::Cognito::UserPoolClient
+    Description: Pool client to be used by users
+    Properties:
+      ClientName: !FindInMap [EnvMappings, userpoolname, !Ref Env]
+      UserPoolId: !Ref UserPool
+      AllowedOAuthFlows:
+        - code
+      CallbackURLs:
+        - !FindInMap [EnvMappings, callback, !Ref Env]
+      LogoutURLs:
+        - !FindInMap [EnvMappings, logout, !Ref Env]
+      AllowedOAuthFlowsUserPoolClient: true
+      AllowedOAuthScopes:
+        - email
+        - phone
+        - openid
+        - profile
+        - aws.cognito.signin.user.admin
+      SupportedIdentityProviders:
+        - COGNITO
+      GenerateSecret: true
+
+  SignInPageDomainName:
+    Type: AWS::Cognito::UserPoolDomain
+    Properties:
+      Domain: !FindInMap [EnvMappings, domain, !Ref Env]
+      UserPoolId: !Ref UserPool
+
+Outputs:
+
+  UserPoolArn:
+    Value: !GetAtt UserPool.Arn
+    Export:
+      Name: !Join
+        - '-'
+        - - UserPoolArn
+          - !Ref Env
+
+  UserPoolClientID:
+    Value: !Ref PoolClientUser
+    Export:
+      Name: !Join
+        - '-'
+        - - UserPoolClientID
+          - !Ref Env
+
+  UserPoolDomain:
+    Value: !Ref SignInPageDomainName
+    Export:
+      Name: !Join
+        - '-'
+        - - SignInPageDomainName
+          - !Ref Env

@@ -1,0 +1,241 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: >
+  Intelligence-engine pipeline main
+
+Parameters:
+  SourcePath:
+    Description: 'S3 build artifact path'
+    Type: String
+    Default: build-artifacts
+  Env:
+    Description: Dev or prod environment
+    Type: String
+    Default: prod
+    AllowedValues:
+      - prod
+      - dev
+
+Mappings:
+  EnvMappings:
+    SourceFile:
+      prod: packaged_master.zip
+      dev: packaged_dev.zip
+    TargetStackName:
+      prod: db-master
+      dev: db-dev
+    GitBranch:
+      prod: master
+      dev: develop
+
+Resources:
+
+  ########  ##     ## #### ##       ########
+  ##     ## ##     ##  ##  ##       ##     ##
+  ##     ## ##     ##  ##  ##       ##     ##
+  ########  ##     ##  ##  ##       ##     ##
+  ##     ## ##     ##  ##  ##       ##     ##
+  ##     ## ##     ##  ##  ##       ##     ##
+  ########   #######  #### ######## ########
+
+  CodeBuildProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name:
+        Fn::Join:
+          - '-'
+          - - Ref: AWS::StackName
+      Description: Build project for the dashboard
+      Artifacts:
+        Type: S3
+        Location: !ImportValue db-pl-dep-BuildArtifactsBucket
+        Path: !Ref SourcePath
+        Name: /
+        NamespaceType: NONE
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/amazonlinux2-x86_64-standard:3.0
+        EnvironmentVariables:
+          - Name: BUILD_OUTPUT_BUCKET
+            Value: !ImportValue DashboardBucket
+          - Name: BUILD_PATH
+            Value: !Ref SourcePath
+          - Name: FILE_NAME
+            Value: !FindInMap [EnvMappings, SourceFile, !Ref Env]
+          - Name: ENV_NAME
+            Value: !Ref Env
+      Cache:
+        Type: S3
+        Location: !Join ['', [!ImportValue db-pl-dep-BuildArtifactsBucket, /codebuild-cache]]
+      ServiceRole: !ImportValue db-pl-dep-CodeBuildIAMRoleARN
+      Source:
+        Type: BITBUCKET
+        GitCloneDepth: 1
+        Location: https://vz_plentify@bitbucket.org/plentifyHQ/dash.git
+      SourceVersion: !FindInMap [EnvMappings, GitBranch, !Ref Env]
+      Triggers:
+        FilterGroups:
+          - - Pattern: "PUSH,PULL_REQUEST_MERGED"
+              Type: EVENT
+            - Pattern: !Join [ "/", [ "refs/heads",  !FindInMap [EnvMappings, GitBranch, !Ref Env]] ]
+              Type: HEAD_REF
+        Webhook: True
+      Tags:
+        - Key: "Stack"
+          Value: !Ref AWS::StackName
+        - Key: "Project"
+          Value: intelligence-engine
+
+  ########  #### ########  ######## ##       #### ##    ## ########
+  ##     ##  ##  ##     ## ##       ##        ##  ###   ## ##
+  ##     ##  ##  ##     ## ##       ##        ##  ####  ## ##
+  ########   ##  ########  ######   ##        ##  ## ## ## ######
+  ##         ##  ##        ##       ##        ##  ##  #### ##
+  ##         ##  ##        ##       ##        ##  ##   ### ##
+  ##        #### ##        ######## ######## #### ##    ## ########
+
+  Pipeline:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      ArtifactStore:
+        Location: !ImportValue db-pl-dep-BuildArtifactsBucket
+        Type: S3
+      Name:
+        Fn::Join:
+          - '-'
+          - - Ref: AWS::StackName
+      RoleArn: !ImportValue db-pl-dep-CodePipelineIAMRoleARN
+      Stages:
+        - Name: Source
+          Actions:
+            - Name: GetBuildTemplate
+              ActionTypeId:
+                Category: Source
+                Owner: AWS
+                Provider: S3
+                Version: 1
+              Configuration:
+                S3Bucket: !ImportValue db-pl-dep-BuildArtifactsBucket
+                S3ObjectKey: !Join [ "/", [ !Ref SourcePath, !FindInMap [EnvMappings, SourceFile, !Ref Env]] ]
+                PollForSourceChanges: false
+              OutputArtifacts:
+                - Name: SourceCodeAsZip
+              RunOrder: 1
+        - Name: Prod
+          Actions:
+#            - Name: DeploymentApproval
+#              ActionTypeId:
+#                Category: Approval
+#                Owner: AWS
+#                Provider: Manual
+#                Version: "1"
+#              RunOrder: 1
+            - Name: CreateChangeSet
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Provider: CloudFormation
+                Version: "1"
+              Configuration:
+                ActionMode: CHANGE_SET_REPLACE
+                RoleArn: !ImportValue db-pl-dep-CloudformationIAMRoleARN
+                StackName: !FindInMap [EnvMappings, TargetStackName, !Ref Env]
+                ChangeSetName: PipelineUpdate
+                TemplatePath: SourceCodeAsZip::template.yaml
+                Capabilities: CAPABILITY_NAMED_IAM
+                TemplateConfiguration: SourceCodeAsZip::parameters.json
+              InputArtifacts:
+                - Name: SourceCodeAsZip
+              RunOrder: 1
+            - Name: ExecuteChangeSet
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Provider: CloudFormation
+                Version: "1"
+              Configuration:
+                ActionMode: CHANGE_SET_EXECUTE
+                RoleArn: !ImportValue db-pl-dep-CloudformationIAMRoleARN
+                StackName: !FindInMap [EnvMappings, TargetStackName, !Ref Env]
+                ChangeSetName: PipelineUpdate
+              OutputArtifacts:
+                - Name: intelligence-engine-changeSet
+              RunOrder: 2
+
+  CloudWatchEventRule:
+    Type: AWS::Events::Rule
+    Properties:
+      EventPattern:
+        source:
+          - aws.s3
+        detail-type:
+          - 'AWS API Call via CloudTrail'
+        detail:
+          eventSource:
+            - s3.amazonaws.com
+          eventName:
+            - CopyObject
+            - PutObject
+            - CompleteMultipartUpload
+          requestParameters:
+            bucketName:
+              - !ImportValue db-pl-dep-BuildArtifactsBucket
+            key:
+              - !Join [ "/", [ !Ref SourcePath, !FindInMap [EnvMappings, SourceFile, !Ref Env]] ]
+      Targets:
+        -
+          Arn:
+            !Join [ '', [ 'arn:aws:codepipeline:', !Ref 'AWS::Region', ':', !Ref 'AWS::AccountId', ':', !Ref Pipeline ] ]
+          RoleArn: !ImportValue db-pl-dep-CloudWatchEventRoleARN
+          Id: codepipeline-Pipeline
+
+  BuildNotificationRule:
+    Type: AWS::CodeStarNotifications::NotificationRule
+    Properties:
+      DetailType: BASIC
+      EventTypeIds:
+        - codebuild-project-build-state-failed
+#        - codebuild-project-build-state-succeeded
+      Name:
+        Fn::Join:
+          - '-'
+          - - Ref: AWS::StackName
+            - build-notifcation
+      Resource: !GetAtt CodeBuildProject.Arn
+      Status: ENABLED
+      Targets:
+        - TargetAddress: !ImportValue IntelligenceEngineTopic
+          TargetType: SNS
+
+  PipelineNotificationRule:
+    Type: AWS::CodeStarNotifications::NotificationRule
+    Properties:
+      DetailType: BASIC
+      EventTypeIds:
+        - codepipeline-pipeline-pipeline-execution-failed
+#        - codepipeline-pipeline-pipeline-execution-succeeded
+      Name:
+        Fn::Join:
+          - '-'
+          - - Ref: AWS::StackName
+            - pipeline-notifcation
+      Resource:
+        !Join [ '', [ 'arn:aws:codepipeline:', !Ref 'AWS::Region', ':', !Ref 'AWS::AccountId', ':', !Ref Pipeline ] ]
+      Status: ENABLED
+      Targets:
+        - TargetAddress: !ImportValue IntelligenceEngineTopic
+          TargetType: SNS
+
+Outputs:
+
+  CodeBuildProject:
+    Description: CodeBuild Project name
+    Value: !Ref CodeBuildProject
+
+  CodePipeline:
+    Description: AWS CodePipeline pipeline name
+    Value: !Ref Pipeline
+
+  CloudWatchEventRule:
+    Description: Event rule name that calls the pipeline through s3 trigger
+    Value: !Ref CloudWatchEventRule
